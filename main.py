@@ -63,3 +63,7 @@ if uploaded_file is not None:
     else:
         st.balloons()
         st.success("Критических падений джобов в данном логе не обнаружено!")
+        # Этот блок должен быть в самом-самом верху файла, сразу после import streamlit as st
+import os
+os.environ["STREAMLIT_SERVER_ENABLE_CORS"] = "false"
+os.environ["STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION"] = "false"
