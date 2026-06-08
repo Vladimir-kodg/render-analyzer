@@ -85,7 +85,7 @@ with tab1:
             # Ищем ошибки
             match_job = re.search(job_fail_pattern, line)
             if match_job:
-                err_time = datetime.strptime(match_job.group(1), "%Y-%m-%d %h:%m:%s") # Ошибка парсинга исправлена в логике ниже
+                err_time = datetime.strptime(match_job.group(1), "%Y-%m-%d %H:%M:%S") # Ошибка парсинга исправлена в логике ниже
                 # Для стабильности используем строку, но проверим дату встроенным методом pandas позже
                 failed_jobs.append({
                     "time_str": match_job.group(1),
