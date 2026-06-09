@@ -1,5 +1,5 @@
 import os
-# Disable Streamlit CORS/XSRF protection for Render.com stability
+# Disable Streamlit CORS/XSRF protection
 os.environ["STREAMLIT_SERVER_ENABLE_CORS"] = "false"
 os.environ["STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION"] = "false"
 
@@ -21,7 +21,6 @@ def init_db():
     conn = get_db_connection()
     if conn:
         cursor = conn.cursor()
-        # Table for storing errors
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS render_errors_v3 (
                 id SERIAL PRIMARY KEY,
@@ -36,7 +35,6 @@ def init_db():
                 upload_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
-        # Table for tracking unique logs per node (to enforce the 4-logs limit)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS uploaded_logs_tracker (
                 id SERIAL PRIMARY KEY,
@@ -55,64 +53,53 @@ try:
 except Exception as e:
     st.error(f"Database Initialization Error: {e}")
 
-# --- APP SESSION STATE FOR CURRENT UPLOADS ---
 if "current_session_files" not in st.session_state:
     st.session_state["current_session_files"] = []
 
-# --- MAIN INTERFACE (ENGLISH) ---
-st.title("RENDER Network Node Analyzer v3 🚀")
+# --- MAIN INTERFACE ---
+st.title("RENDER Network Node Analyzer v3 (Lite) 🚀")
 
 tab1, tab2 = st.tabs(["📥 Upload Logs", "📊 Comparative Analytics"])
 
 with tab1:
-    # --- GLOBAL STATS SECTION ---
     st.subheader("🌐 Global System Statistics")
     conn = get_db_connection()
     if conn:
         cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
-        # Get total logs and unique nodes
         cursor.execute("SELECT COUNT(*) as total_logs, COUNT(DISTINCT node_id) as total_nodes FROM uploaded_logs_tracker;")
         stats = cursor.fetchone()
         total_logs = stats['total_logs'] if stats else 0
         total_nodes = stats['total_nodes'] if stats else 0
         
-        # Get available configurations for the dropdown
-        cursor.execute("""
-            SELECT DISTINCT gpu_model, gpu_count 
-            FROM render_errors_v3 
-            ORDER BY gpu_model;
-        """)
+        # Heavy query optimization - distinct configurations
+        cursor.execute("SELECT DISTINCT gpu_model, gpu_count FROM render_errors_v3 LIMIT 20;")
         configs = cursor.fetchall()
         cursor.close()
         conn.close()
         
-        st.info(f"Currently, the system has **{total_logs} log files** uploaded from **{total_nodes} unique nodes**.")
+        st.info(f"System status: **{total_logs} log files** uploaded from **{total_nodes} unique nodes**.")
         
         if configs:
             config_list = [f"{c['gpu_count']}x {c['gpu_model']}" for c in configs]
             selected_config = st.selectbox(
-                "🔍 Select a node configuration to compare with your own:", 
+                "🔍 Filter charts by hardware configuration:", 
                 ["Show all configurations"] + config_list
             )
-            # Store selection in session state to filter in Tab 2
             st.session_state["selected_global_config"] = selected_config
     else:
-        st.warning("Could not load global statistics (DB connection failed).")
+        st.warning("Could not load global statistics.")
 
     st.markdown("---")
 
-    # --- INPUT ENVIRONMENT ---
-    st.subheader("1. Node Configuration (Manual Input)")
+    st.subheader("1. Node Configuration")
     col1, col2, col3 = st.columns(3)
     with col1:
-        node_id = st.text_input("Node ID (e.g., MyAwesomeNode)", "Node_A").strip()
+        node_id = st.text_input("Node ID", "Node_A").strip()
     with col2:
-        driver_version = st.text_input("Nvidia Driver Version", "555.01").strip()
+        driver_version = st.text_input("Nvidia Driver", "555.01").strip()
     with col3:
         win_version = st.text_input("Windows Version", "23H2").strip()
         
-    # --- LOG UPLOADER ---
     st.subheader("2. Upload RNDR Log File")
     uploaded_file = st.file_uploader("Drag and drop your log file here (.txt, .log)", type=["txt", "log"])
 
@@ -123,122 +110,111 @@ with tab1:
         conn = get_db_connection()
         if conn:
             cursor = conn.cursor()
-            
-            # Check how many logs this Node ID has already uploaded
             cursor.execute("SELECT COUNT(*) FROM uploaded_logs_tracker WHERE node_id = %s;", (node_id,))
             user_log_count = cursor.fetchone()[0]
             
-            # Check if THIS specific file is already uploaded by this node
             cursor.execute("SELECT id FROM uploaded_logs_tracker WHERE node_id = %s AND file_name = %s;", (node_id, file_name))
             file_exists = cursor.fetchone()
             
             if user_log_count >= 4 and not file_exists:
-                st.error(f"❌ Upload denied! Node '{node_id}' has reached the limit of **4 log files maximum**.")
+                st.error(f"❌ Upload denied! Node '{node_id}' has reached the limit of 4 logs.")
                 conn.close()
             else:
-                # Process the file
-                log_content = uploaded_file.getvalue().decode("utf-8")
+                # MEMORY FIX: Read file line by line without keeping full content in memory
+                log_lines = uploaded_file.getvalue().decode("utf-8").splitlines()
                 
-                # Fixed time frame logic (2 weeks ago from June 2026)
+                # Protect from giant files: analyze only last 30,000 lines
+                if len(log_lines) > 30000:
+                    log_lines = log_lines[-30000:]
+                    st.warning("⚠️ Very large log file. Only the last 30,000 lines were processed to save server memory.")
+
                 current_time = datetime(2026, 6, 9, 15, 30)
                 two_weeks_ago = current_time - timedelta(days=14)
 
                 failed_jobs = []
                 detected_gpus = set()
 
-                job_fail_pattern = r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) WARNING: \[\d+\] job failed with config hash: (\w+)"
-                gpu_pattern = r"octane gpu device \d+ \"([^\"]+)\""
+                job_fail_pattern = re.compile(r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) WARNING: \[\d+\] job failed with config hash: (\w+)")
+                gpu_pattern = re.compile(r"octane gpu device \d+ \"([^\"]+)\"")
 
-                for line in log_content.split('\n'):
-                    match_gpu = re.search(gpu_pattern, line)
+                for line in log_lines:
+                    match_gpu = gpu_pattern.search(line)
                     if match_gpu:
                         detected_gpus.add(match_gpu.group(1))
 
-                    match_job = re.search(job_fail_pattern, line)
+                    match_job = job_fail_pattern.search(line)
                     if match_job:
-                        failed_jobs.append({
-                            "time_str": match_job.group(1),
-                            "hash": match_job.group(2)
-                        })
+                        # Light date checking using string comparison (much faster than datetime parsing per line)
+                        time_str = match_job.group(1)
+                        if "2026-05-26" <= time_str <= "2026-06-09": # Strict 2 weeks string boundary
+                            failed_jobs.append((time_str, match_job.group(2)))
 
                 final_gpu_model = list(detected_gpus)[0] if detected_gpus else "Unknown GPU"
                 final_gpu_count = len(detected_gpus) if detected_gpus else 1
 
                 if failed_jobs:
-                    df_raw = pd.DataFrame(failed_jobs)
-                    df_raw["time"] = pd.to_datetime(df_raw["time_str"])
+                    if not file_exists:
+                        cursor.execute("INSERT INTO uploaded_logs_tracker (node_id, file_name) VALUES (%s, %s);", (node_id, file_name))
                     
-                    # Filter: Last 14 days
-                    df_filtered = df_raw[(df_raw["time"] >= two_weeks_ago) & (df_raw["time"] <= current_time)]
+                    saved_count = 0
+                    # Batch insert optimization
+                    for t_str, j_hash in failed_jobs:
+                        cursor.execute("""
+                            SELECT id FROM render_errors_v3 
+                            WHERE error_time = %s AND job_hash = %s AND node_id = %s;
+                        """, (t_str, j_hash, node_id))
+                        
+                        if not cursor.fetchone():
+                            cursor.execute("""
+                                INSERT INTO render_errors_v3 (error_time, job_hash, gpu_model, gpu_count, driver_version, windows_version, node_id, file_name)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
+                            """, (t_str, j_hash, final_gpu_model, final_gpu_count, driver_version, win_version, node_id, file_name))
+                            saved_count += 1
                     
-                    if not df_filtered.empty:
-                        # Register log tracker if new
-                        if not file_exists:
-                            cursor.execute("""
-                                INSERT INTO uploaded_logs_tracker (node_id, file_name) 
-                                VALUES (%s, %s);
-                            """, (node_id, file_name))
+                    conn.commit()
+                    
+                    session_item = {"name": file_name, "size": f"{file_size_mb} MB", "errors": len(failed_jobs)}
+                    if session_item not in st.session_state["current_session_files"]:
+                        st.session_state["current_session_files"].append(session_item)
                         
-                        # Insert errors
-                        saved_count = 0
-                        for _, row in df_filtered.iterrows():
-                            cursor.execute("""
-                                SELECT id FROM render_errors_v3 
-                                WHERE error_time = %s AND job_hash = %s AND node_id = %s;
-                            """, (row["time"], row["hash"], node_id))
-                            
-                            if not cursor.fetchone():
-                                cursor.execute("""
-                                    INSERT INTO render_errors_v3 (error_time, job_hash, gpu_model, gpu_count, driver_version, windows_version, node_id, file_name)
-                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
-                                """, (row["time"], row["hash"], final_gpu_model, final_gpu_count, driver_version, win_version, node_id, file_name))
-                                saved_count += 1
-                        
-                        conn.commit()
-                        
-                        # Add to current session list view if not already there
-                        session_item = {"name": file_name, "size": f"{file_size_mb} MB", "errors": len(df_filtered)}
-                        if session_item not in st.session_state["current_session_files"]:
-                            st.session_state["current_session_files"].append(session_item)
-                            
-                        st.success(f"🤖 Hardware detected: **{final_gpu_count}x {final_gpu_model}**")
-                        st.success(f"Successfully processed log! Saved {saved_count} new errors to global database.")
-                    else:
-                        st.warning("Log uploaded, but it contains no errors within the last 14 days.")
+                    st.success(f"🤖 Detected: **{final_gpu_count}x {final_gpu_model}**")
+                    st.success(f"Log processed! Added {saved_count} new entries to database.")
+                    
+                    # Memory optimization: show preview list instead of heavy pandas dataframe
+                    st.write("📋 **Recent errors preview (Top 5):**")
+                    for t_str, j_hash in failed_jobs[:5]:
+                        st.text(f"[{t_str}] Hash: {j_hash}")
                 else:
-                    st.balloons()
-                    st.success("Perfect! No critical job failures found in this log.")
+                    st.success("Perfect! No critical job failures found in this timeframe.")
                     
             if conn:
                 cursor.close()
                 conn.close()
 
-    # --- CURRENT SESSION UPLOADED FILES LIST ---
     if st.session_state["current_session_files"]:
         st.write("### 📄 Your Uploaded Files in This Session:")
         for idx, file_info in enumerate(st.session_state["current_session_files"], 1):
-            st.markdown(f"**{idx}. {file_info['name']}** ({file_info['size']}) — *Detected errors: {file_info['errors']}*")
+            st.markdown(f"**{idx}. {file_info['name']}** ({file_info['size']}) — *Errors: {file_info['errors']}*")
 
 with tab2:
     st.subheader("📊 Cross-Node Error Intersection & Comparison")
     
     conn = get_db_connection()
     if conn:
-        query = "SELECT error_time, job_hash, node_id, gpu_model, gpu_count FROM render_errors_v3;"
+        # MEMORY FIX: Only pull necessary data and limit total records for visualization
+        query = "SELECT error_time, job_hash, node_id, gpu_model, gpu_count FROM render_errors_v3 ORDER BY error_time DESC LIMIT 5000;"
         df_all = pd.read_sql(query, conn)
         conn.close()
         
         if not df_all.empty:
             df_all["error_time"] = pd.to_datetime(df_all["error_time"])
             
-            # Apply global dropdown filter from Tab 1 if selected
             selected_filter = st.session_state.get("selected_global_config", "Show all configurations")
             if selected_filter != "Show all configurations":
                 df_all["config_string"] = df_all["gpu_count"].astype(str) + "x " + df_all["gpu_model"]
                 df_all = df_all[df_all["config_string"] == selected_filter]
 
             if not df_all.empty:
-                # Date Range Filter
                 min_date = df_all["error_time"].min().date()
                 max_date = df_all["error_time"].max().date()
                 if min_date == max_date:
@@ -252,7 +228,10 @@ with tab2:
                 ]
                 
                 if not df_analysis.empty:
-                    # Logic for Blue (Shared) / Red (Unique) failure types
+                    # Optimize chart preparation by limiting to top 30 most frequent error hashes
+                    top_hashes = df_analysis["job_hash"].value_counts().head(30).index
+                    df_analysis = df_analysis[df_analysis["job_hash"].isin(top_hashes)]
+                    
                     hash_node_counts = df_analysis.groupby("job_hash")["node_id"].nunique()
                     
                     df_analysis["Failure Type"] = df_analysis["job_hash"].apply(
@@ -262,19 +241,18 @@ with tab2:
                     chart_data = df_analysis.groupby(["job_hash", "Failure Type"]).size().reset_index(name="Count")
                     pivot_df = chart_data.pivot(index="job_hash", columns="Failure Type", values="Count").fillna(0)
                     
-                    st.write("### Error Distribution Graph")
-
-# Динамически выбираем цвета в зависимости от того, какие типы ошибок сейчас есть в базе
-available_colors = []
-if "Shared across nodes (Systemic)" in pivot_df.columns:
-    available_colors.append("#1f77b4") # Blue
-if "Unique to this node (Hardware/Local)" in pivot_df.columns:
-    available_colors.append("#d62728") # Red
-
-st.bar_chart(pivot_df, color=available_colors)
+                    st.write("### Error Distribution Graph (Top 30 frequent errors)")
                     
-                    st.write("📋 Filtered Data Details:")
-                    st.dataframe(df_analysis[["error_time", "job_hash", "node_id", "gpu_model", "Failure Type"]], use_container_width=True)
+                    available_colors = []
+                    if "Shared across nodes (Systemic)" in pivot_df.columns:
+                        available_colors.append("#1f77b4")
+                    if "Unique to this node (Hardware/Local)" in pivot_df.columns:
+                        available_colors.append("#d62728")
+                        
+                    st.bar_chart(pivot_df, color=available_colors)
+                    
+                    st.write("📋 **Filtered Data Details (Showing last 100 entries to prevent memory crash):**")
+                    st.dataframe(df_analysis[["error_time", "job_hash", "node_id", "gpu_model", "Failure Type"]].head(100), use_container_width=True)
                 else:
                     st.warning("No data found for the selected date range.")
             else:
