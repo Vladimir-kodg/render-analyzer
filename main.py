@@ -263,7 +263,15 @@ with tab2:
                     pivot_df = chart_data.pivot(index="job_hash", columns="Failure Type", values="Count").fillna(0)
                     
                     st.write("### Error Distribution Graph")
-                    st.bar_chart(pivot_df, color=["#1f77b4", "#d62728"]) # Blue and Red colors
+
+# Динамически выбираем цвета в зависимости от того, какие типы ошибок сейчас есть в базе
+available_colors = []
+if "Shared across nodes (Systemic)" in pivot_df.columns:
+    available_colors.append("#1f77b4") # Blue
+if "Unique to this node (Hardware/Local)" in pivot_df.columns:
+    available_colors.append("#d62728") # Red
+
+st.bar_chart(pivot_df, color=available_colors)
                     
                     st.write("📋 Filtered Data Details:")
                     st.dataframe(df_analysis[["error_time", "job_hash", "node_id", "gpu_model", "Failure Type"]], use_container_width=True)
